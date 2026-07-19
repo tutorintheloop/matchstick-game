@@ -1,0 +1,859 @@
+import React, { useState, useEffect } from 'react';
+
+export default function MatchstickGame() {
+  const [gameState, setGameState] = useState('coinflip'); // coinflip, instructions, playing, levelComplete, cpuWins
+  const [level, setLevel] = useState(1);
+  const [pyramid, setPyramid] = useState([1, 2, 3, 4]);
+  const [selectedMatches, setSelectedMatches] = useState([]); // Array of {row, index} objects
+  const [playerFirst, setPlayerFirst] = useState(null);
+  const [currentTurn, setCurrentTurn] = useState(null);
+  const [message, setMessage] = useState('');
+  const [gameLog, setGameLog] = useState([]);
+  const [coinResult, setCoinResult] = useState(null);
+  const [winner, setWinner] = useState(null);
+  const [startTime, setStartTime] = useState(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [playCount, setPlayCount] = useState(0);
+  const [level10Count, setLevel10Count] = useState(0);
+  const [statsLoaded, setStatsLoaded] = useState(false);
+
+  const totalMatchsticks = pyramid.reduce((sum, count) => sum + count, 0);
+
+  // Load statistics from persistent storage
+  useEffect(() => {
+    const loadStats = async () => {
+      try {
+        const playCountData = await window.storage.get('matchstick-play-count', true);
+        const level10Data = await window.storage.get('matchstick-level-10-count', true);
+        
+        setPlayCount(playCountData ? parseInt(playCountData.value) : 0);
+        setLevel10Count(level10Data ? parseInt(level10Data.value) : 0);
+        setStatsLoaded(true);
+      } catch (err) {
+        console.log('Could not load stats:', err);
+        setStatsLoaded(true);
+      }
+    };
+    
+    loadStats();
+  }, []);
+
+  // Increment play count when game starts
+  const incrementPlayCount = async () => {
+    try {
+      const newCount = playCount + 1;
+      await window.storage.set('matchstick-play-count', newCount.toString(), true);
+      setPlayCount(newCount);
+    } catch (err) {
+      console.log('Could not update play count:', err);
+    }
+  };
+
+  // Increment level 10 count when player wins
+  const incrementLevel10Count = async () => {
+    try {
+      const newCount = level10Count + 1;
+      await window.storage.set('matchstick-level-10-count', newCount.toString(), true);
+      setLevel10Count(newCount);
+    } catch (err) {
+      console.log('Could not update level 10 count:', err);
+    }
+  };
+
+  // Timer effect
+  useEffect(() => {
+    if (gameState === 'playing' && !startTime) {
+      setStartTime(Date.now());
+    }
+  }, [gameState, startTime]);
+
+  // Update elapsed time every second
+  useEffect(() => {
+    if (gameState !== 'playing' || !startTime) return;
+    
+    const interval = setInterval(() => {
+      const now = Date.now();
+      const seconds = Math.floor((now - startTime) / 1000);
+      setElapsedSeconds(seconds);
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [gameState, startTime]);
+
+  // Format elapsed time
+  const formatTime = (seconds) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  // Generate pyramid for a given level
+  const generatePyramid = (levelNum) => {
+    const rows = [];
+    for (let i = 1; i <= levelNum + 3; i++) {
+      rows.push(i);
+    }
+    return rows;
+  };
+
+  // Coin flip
+  const flipCoin = () => {
+    const heads = Math.random() > 0.5;
+    setCoinResult(heads ? 'Heads' : 'Tails');
+    setPlayerFirst(heads);
+    setCurrentTurn(heads ? 'player' : 'cpu');
+    setPyramid(generatePyramid(1));
+    setGameState('instructions');
+    setMessage(heads ? "You won the coin flip! You go first." : "CPU won the coin flip. CPU goes first.");
+  };
+
+  // Start the game
+  const startGame = () => {
+    setGameState('playing');
+    incrementPlayCount();
+    if (!playerFirst) {
+      setTimeout(() => cpuMove(pyramid), 1000);
+    }
+  };
+
+  // Game theory AI - Find optimal move
+  const calculateOptimalMove = (currentPyramid) => {
+    // Misère Nim strategy - avoid being forced to take the last matchstick
+    const total = currentPyramid.reduce((sum, count) => sum + count, 0);
+    
+    let bestMove = null;
+    let bestScore = -Infinity;
+
+    // Generate all possible moves
+    for (let totalToTake = 1; totalToTake <= 4; totalToTake++) {
+      // Try different distributions of taking totalToTake matchsticks
+      const moves = generateAllMoves(currentPyramid, totalToTake);
+      
+      for (const move of moves) {
+        const newPyramid = applyMove(currentPyramid, move);
+        const newTotal = newPyramid.reduce((sum, count) => sum + count, 0);
+
+        let score = 0;
+        if (newTotal === 1) {
+          // If we leave 1 stick, opponent must take it and loses
+          score = 100;
+        } else if (newTotal === 0) {
+          // We took the last stick - bad!
+          score = -100;
+        } else {
+          // Use Nim-sum (XOR) for optimal play
+          const nimSum = newPyramid.reduce((xor, count) => xor ^ count, 0);
+          score = nimSum === 0 ? 10 : -5;
+        }
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestMove = move;
+        }
+      }
+    }
+
+    return bestMove || [{ row: 0, count: 1 }];
+  };
+
+  // Generate all possible ways to take 'count' matchsticks
+  const generateAllMoves = (currentPyramid, count) => {
+    const moves = [];
+    
+    // Single row moves
+    for (let row = 0; row < currentPyramid.length; row++) {
+      if (currentPyramid[row] > 0 && currentPyramid[row] >= count) {
+        moves.push([{ row, count }]);
+      }
+    }
+
+    // Multi-row moves
+    if (count > 1) {
+      for (let row1 = 0; row1 < currentPyramid.length; row1++) {
+        if (currentPyramid[row1] === 0) continue;
+        for (let take1 = 1; take1 < count; take1++) {
+          for (let row2 = row1 + 1; row2 < currentPyramid.length; row2++) {
+            if (currentPyramid[row2] === 0) continue;
+            const take2 = count - take1;
+            if (take2 <= currentPyramid[row2]) {
+              moves.push([
+                { row: row1, count: take1 },
+                { row: row2, count: take2 }
+              ]);
+            }
+          }
+        }
+      }
+    }
+
+    return moves;
+  };
+
+  // Apply a move (array of {row, count} objects)
+  const applyMove = (currentPyramid, move) => {
+    const newPyramid = [...currentPyramid];
+    for (const { row, count } of move) {
+      newPyramid[row] -= count;
+    }
+    return newPyramid;
+  };
+
+  // CPU makes a move
+  const cpuMove = (currentPyramid) => {
+    const move = calculateOptimalMove(currentPyramid);
+    const newPyramid = applyMove(currentPyramid, move);
+
+    const newTotal = newPyramid.reduce((sum, count) => sum + count, 0);
+    
+    let moveMessage = 'CPU takes ';
+    moveMessage += move.map(m => `${m.count} from row ${m.row + 1}`).join(', ');
+    
+    setGameLog(prev => [...prev, moveMessage]);
+    setMessage(moveMessage);
+    setPyramid(newPyramid);
+
+    if (newTotal === 0) {
+      setGameState('levelComplete');
+      setWinner('player');
+      setMessage(`🎉 CPU forced to take the last matchstick! Level ${level} Complete!`);
+      return;
+    }
+
+    setCurrentTurn('player');
+  };
+
+  // Toggle matchstick selection
+  const toggleMatchstick = (row, index) => {
+    if (selectedMatches.length >= 4) {
+      // Check if this matchstick is already selected
+      const isSelected = selectedMatches.some(m => m.row === row && m.index === index);
+      if (!isSelected) {
+        setMessage('You can only take up to 4 matchsticks!');
+        return;
+      }
+    }
+
+    setSelectedMatches(prev => {
+      const isSelected = prev.some(m => m.row === row && m.index === index);
+      if (isSelected) {
+        return prev.filter(m => !(m.row === row && m.index === index));
+      } else {
+        return [...prev, { row, index }];
+      }
+    });
+    setMessage('');
+  };
+
+  // Player makes a move
+  const playerMove = () => {
+    if (selectedMatches.length === 0) {
+      setMessage('Please select at least 1 matchstick (max 4)');
+      return;
+    }
+
+    // Group selected matches by row
+    const moveByRow = {};
+    for (const { row } of selectedMatches) {
+      moveByRow[row] = (moveByRow[row] || 0) + 1;
+    }
+
+    // Validate move is legal
+    for (const [row, count] of Object.entries(moveByRow)) {
+      const rowNum = parseInt(row);
+      if (count > pyramid[rowNum]) {
+        setMessage('Invalid selection!');
+        return;
+      }
+    }
+
+    const move = Object.entries(moveByRow).map(([row, count]) => ({
+      row: parseInt(row),
+      count
+    }));
+
+    const newPyramid = applyMove(pyramid, move);
+    
+    let moveMessage = 'You take ';
+    moveMessage += move.map(m => `${m.count} from row ${m.row + 1}`).join(', ');
+    
+    setGameLog(prev => [...prev, moveMessage]);
+    setMessage(moveMessage);
+    setPyramid(newPyramid);
+
+    const newTotal = newPyramid.reduce((sum, count) => sum + count, 0);
+    
+    // CHECK IF PLAYER TOOK THE LAST MATCHSTICK - PLAYER LOSES
+    if (newTotal === 0) {
+      setGameState('cpuWins');
+      setWinner('cpu');
+      setMessage("💀 You took the last matchstick! CPU wins this level!");
+      setSelectedMatches([]);
+      return;
+    }
+
+    setSelectedMatches([]);
+    setCurrentTurn('cpu');
+    
+    setTimeout(() => cpuMove(newPyramid), 1000);
+  };
+
+  // Advance to next level
+  const nextLevel = () => {
+    const newLevel = level + 1;
+    setLevel(newLevel);
+    setPyramid(generatePyramid(newLevel));
+    setSelectedMatches([]);
+    setCurrentTurn('player');
+    setMessage(`Welcome to Level ${newLevel}!`);
+    setGameLog([]);
+    setGameState('playing');
+    setWinner(null);
+  };
+
+  // Continue after level complete screen
+  const continueToNextLevel = () => {
+    const newLevel = level + 1;
+    
+    if (newLevel > 10) {
+      // Game won - show final congratulations
+      setGameState('gameOver');
+      setWinner('player');
+      return;
+    }
+
+    setLevel(newLevel);
+    setPyramid(generatePyramid(newLevel));
+    setSelectedMatches([]);
+    setCurrentTurn('player');
+    setMessage(`Welcome to Level ${newLevel}!`);
+    setGameLog([]);
+    setGameState('playing');
+    setWinner(null);
+  };
+
+  // Reset game
+  const resetGame = () => {
+    setGameState('coinflip');
+    setLevel(1);
+    setPyramid(generatePyramid(1));
+    setSelectedMatches([]);
+    setPlayerFirst(null);
+    setCurrentTurn(null);
+    setMessage('');
+    setGameLog([]);
+    setCoinResult(null);
+    setWinner(null);
+    setStartTime(null);
+    setElapsedSeconds(0);
+  };
+
+  return (
+    <div style={styles.container}>
+      <h1 style={styles.title}>⚡ Matchstick Pyramid</h1>
+      
+      {statsLoaded && (
+        <div style={styles.statsWidget}>
+          <div style={styles.statItem}>
+            <div style={styles.statNumber}>{playCount}</div>
+            <div style={styles.statLabel}>Players</div>
+          </div>
+          <div style={styles.statDivider}></div>
+          <div style={styles.statItem}>
+            <div style={styles.statNumber}>{level10Count}</div>
+            <div style={styles.statLabel}>Beat All Levels</div>
+          </div>
+        </div>
+      )}
+
+      {gameState === 'coinflip' && (
+        <div style={styles.coinflipSection}>
+          <h2>🪙 Flip a Coin to Determine Who Goes First</h2>
+          <p>Level 1: Beat the CPU to progress to harder levels!</p>
+          <button onClick={flipCoin} style={styles.button}>
+            FLIP COIN
+          </button>
+          {coinResult && (
+            <div style={styles.coinResult}>
+              <p style={styles.coinText}>{coinResult}</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {gameState === 'instructions' && (
+        <div style={styles.instructionsSection}>
+          <div style={styles.resultBox}>
+            <h2>{playerFirst ? '👤 You go first!' : '🤖 CPU goes first!'}</h2>
+            
+            <div style={styles.rulesContainer}>
+              <h3 style={styles.rulesTitle}>How to Play:</h3>
+              
+              <div style={styles.ruleItem}>
+                <div style={styles.ruleNumber}>1</div>
+                <div style={styles.ruleText}>
+                  <strong>Select matchsticks</strong> from the pyramid by clicking them
+                </div>
+              </div>
+
+              <div style={styles.ruleItem}>
+                <div style={styles.ruleNumber}>2</div>
+                <div style={styles.ruleText}>
+                  <strong>Take 1-4 matchsticks</strong> in a single turn (can be from different rows)
+                </div>
+              </div>
+
+              <div style={styles.ruleItem}>
+                <div style={styles.ruleNumber}>3</div>
+                <div style={styles.ruleText}>
+                  <strong>Avoid the last matchstick</strong> – whoever is forced to take it loses!
+                </div>
+              </div>
+
+              <div style={styles.ruleItem}>
+                <div style={styles.ruleNumber}>4</div>
+                <div style={styles.ruleText}>
+                  <strong>Beat all 10 levels</strong> to win and see your final time
+                </div>
+              </div>
+            </div>
+
+            <button onClick={startGame} style={styles.button}>
+              START GAME - LEVEL 1
+            </button>
+          </div>
+        </div>
+      )}
+
+      {gameState === 'playing' && (
+        <>
+          <div style={styles.statusBar}>
+            <div style={styles.status}>
+              <strong>Level:</strong> {level}/10
+            </div>
+            <div style={styles.status}>
+              <strong>Turn:</strong> {currentTurn === 'player' ? '👤 Your Turn' : '🤖 CPU Turn'}
+            </div>
+            <div style={styles.status}>
+              <strong>Matchsticks Left:</strong> {totalMatchsticks}
+            </div>
+            <div style={styles.timerDisplay}>
+              ⏱️ {formatTime(elapsedSeconds)}
+            </div>
+          </div>
+
+          <div style={styles.pyramidContainer}>
+            {pyramid.map((count, idx) => {
+              // Safety check to ensure count is a valid positive number
+              const validCount = Math.max(0, parseInt(count) || 0);
+              return (
+                <div key={idx} style={styles.row}>
+                  <div style={styles.rowLabel}>Row {idx + 1}:</div>
+                  <div style={styles.matchsticks}>
+                    {validCount > 0 && Array(validCount).fill(0).map((_, i) => {
+                      const isSelected = selectedMatches.some(m => m.row === idx && m.index === i);
+                      return (
+                        <div
+                          key={i}
+                          onClick={() => currentTurn === 'player' && toggleMatchstick(idx, i)}
+                          style={{
+                            ...styles.matchstick,
+                            backgroundColor: isSelected ? '#4CAF50' : '#FF6B6B',
+                            opacity: isSelected ? 1 : 0.6,
+                            cursor: currentTurn === 'player' ? 'pointer' : 'default',
+                            transform: isSelected ? 'scale(1.3)' : 'scale(1)',
+                          }}
+                          title={currentTurn === 'player' ? 'Click to select' : ''}
+                        />
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {currentTurn === 'player' && (
+            <div style={styles.controlPanel}>
+              <div style={styles.controlInfo}>
+                <p>Selected: {selectedMatches.length} matchstick{selectedMatches.length !== 1 ? 's' : ''} (Max 4)</p>
+              </div>
+              <button 
+                onClick={playerMove}
+                disabled={selectedMatches.length === 0}
+                style={{
+                  ...styles.takeButton,
+                  opacity: selectedMatches.length === 0 ? 0.5 : 1,
+                  cursor: selectedMatches.length === 0 ? 'not-allowed' : 'pointer',
+                }}
+              >
+                {selectedMatches.length > 0 
+                  ? `Take ${selectedMatches.length} Matchstick${selectedMatches.length !== 1 ? 's' : ''}`
+                  : 'Click matchsticks to select'}
+              </button>
+            </div>
+          )}
+
+          <div style={styles.messageBox}>{message}</div>
+
+          <div style={styles.gameLog}>
+            <h3>Game Log</h3>
+            {gameLog.length > 0 ? (
+              gameLog.map((entry, idx) => (
+                <div key={idx} style={styles.logEntry}>{entry}</div>
+              ))
+            ) : (
+              <div style={styles.logEntry}>Game started...</div>
+            )}
+          </div>
+        </>
+      )}
+
+      {gameState === 'levelComplete' && winner === 'player' && level < 10 && (
+        <div style={styles.gameOverSection}>
+          <div style={styles.resultBox}>
+            <h2>🎉 Congratulations!</h2>
+            <p style={styles.congrats}>You beat the AI for {level} level{level !== 1 ? 's' : ''}!</p>
+            <p style={styles.challenge}>Can you do better?</p>
+            <div style={styles.screenshotPrompt}>
+              <p>📸 Screenshot this screen and challenge your friends!</p>
+            </div>
+            <button onClick={continueToNextLevel} style={styles.button}>
+              NEXT LEVEL
+            </button>
+          </div>
+        </div>
+      )}
+
+      {gameState === 'levelComplete' && winner === 'player' && level >= 10 && (
+        <div style={styles.gameOverSection}>
+          <div style={styles.resultBox}>
+            <h2>🏆 YOU DID IT!</h2>
+            <p style={styles.congrats}>You beat the AI for all 10 levels!</p>
+            <p style={styles.timeDisplay}>Your Time: {formatTime(elapsedSeconds)}</p>
+            <div style={styles.screenshotPrompt}>
+              <p>📸 Screenshot this for proof!</p>
+              <p>Challenge your friends to beat your time:</p>
+              <div style={styles.qrCode}>
+                <p>QR Code Placeholder</p>
+                <p style={styles.qrSubtext}>(Scan to play)</p>
+              </div>
+            </div>
+            <button 
+              onClick={() => {
+                incrementLevel10Count();
+                resetGame();
+              }} 
+              style={styles.button}
+            >
+              PLAY AGAIN
+            </button>
+          </div>
+        </div>
+      )}
+
+      {gameState === 'cpuWins' && (
+        <div style={styles.gameOverSection}>
+          <div style={styles.resultBox}>
+            <h2 style={styles.cpuWinsHeader}>😅 CPU WINS!</h2>
+            <p style={styles.lossMessage}>You were forced to take the last matchstick on Level {level}.</p>
+            <p style={styles.encouragement}>Better luck next time! Can you make it further?</p>
+            <button onClick={resetGame} style={styles.button}>
+              TRY AGAIN
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const styles = {
+  container: {
+    maxWidth: '700px',
+    margin: '0 auto',
+    padding: '20px',
+    fontFamily: 'system-ui, -apple-system, sans-serif',
+    backgroundColor: '#f5f5f5',
+    borderRadius: '10px',
+  },
+  title: {
+    textAlign: 'center',
+    color: '#333',
+    marginBottom: '20px',
+  },
+  coinflipSection: {
+    textAlign: 'center',
+    padding: '30px',
+    backgroundColor: 'white',
+    borderRadius: '8px',
+  },
+  instructionsSection: {
+    display: 'flex',
+    justifyContent: 'center',
+    alignItems: 'center',
+    minHeight: '400px',
+  },
+  rulesContainer: {
+    textAlign: 'left',
+    backgroundColor: '#f9f9f9',
+    padding: '25px',
+    borderRadius: '8px',
+    margin: '20px 0',
+    border: '2px solid #e0e0e0',
+  },
+  rulesTitle: {
+    textAlign: 'center',
+    fontSize: '20px',
+    color: '#333',
+    marginBottom: '20px',
+  },
+  ruleItem: {
+    display: 'flex',
+    gap: '15px',
+    marginBottom: '15px',
+    alignItems: 'flex-start',
+  },
+  ruleNumber: {
+    backgroundColor: '#2196F3',
+    color: 'white',
+    borderRadius: '50%',
+    width: '35px',
+    height: '35px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontWeight: 'bold',
+    fontSize: '16px',
+    flexShrink: 0,
+  },
+  ruleText: {
+    fontSize: '15px',
+    color: '#555',
+    lineHeight: '1.5',
+    paddingTop: '3px',
+  },
+  coinResult: {
+    marginTop: '20px',
+    fontSize: '48px',
+    fontWeight: 'bold',
+  },
+  coinText: {
+    margin: '10px 0',
+    color: '#2196F3',
+  },
+  statusBar: {
+    display: 'flex',
+    justifyContent: 'space-around',
+    marginBottom: '20px',
+    backgroundColor: 'white',
+    padding: '15px',
+    borderRadius: '8px',
+    flexWrap: 'wrap',
+    gap: '10px',
+    alignItems: 'center',
+  },
+  status: {
+    fontSize: '14px',
+    color: '#333',
+  },
+  timerDisplay: {
+    fontSize: '16px',
+    fontWeight: 'bold',
+    color: '#FF6B6B',
+    backgroundColor: '#ffe6e6',
+    padding: '8px 12px',
+    borderRadius: '6px',
+  },
+  pyramidContainer: {
+    backgroundColor: 'white',
+    padding: '30px',
+    borderRadius: '8px',
+    marginBottom: '20px',
+    textAlign: 'center',
+  },
+  row: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: '15px',
+    gap: '15px',
+  },
+  rowLabel: {
+    fontWeight: 'bold',
+    minWidth: '50px',
+    fontSize: '14px',
+    textAlign: 'right',
+  },
+  matchsticks: {
+    display: 'flex',
+    gap: '6px',
+  },
+  matchstick: {
+    width: '6px',
+    height: '25px',
+    backgroundColor: '#FF6B6B',
+    borderRadius: '3px',
+    transition: 'all 0.2s ease',
+  },
+  controlPanel: {
+    backgroundColor: 'white',
+    padding: '20px',
+    borderRadius: '8px',
+    marginBottom: '20px',
+  },
+  controlInfo: {
+    marginBottom: '15px',
+    fontSize: '16px',
+    fontWeight: 'bold',
+    color: '#333',
+  },
+  takeButton: {
+    width: '100%',
+    padding: '12px',
+    backgroundColor: '#4CAF50',
+    color: 'white',
+    border: 'none',
+    borderRadius: '4px',
+    fontSize: '16px',
+    fontWeight: 'bold',
+    cursor: 'pointer',
+    transition: 'background-color 0.2s ease',
+  },
+  button: {
+    padding: '12px 24px',
+    backgroundColor: '#2196F3',
+    color: 'white',
+    border: 'none',
+    borderRadius: '4px',
+    fontSize: '16px',
+    fontWeight: 'bold',
+    cursor: 'pointer',
+    marginTop: '10px',
+  },
+  messageBox: {
+    backgroundColor: '#fff3cd',
+    border: '1px solid #ffc107',
+    padding: '12px',
+    borderRadius: '4px',
+    marginBottom: '20px',
+    textAlign: 'center',
+    minHeight: '40px',
+  },
+  gameLog: {
+    backgroundColor: 'white',
+    padding: '15px',
+    borderRadius: '8px',
+    maxHeight: '150px',
+    overflowY: 'auto',
+  },
+  logEntry: {
+    fontSize: '13px',
+    padding: '4px 0',
+    borderBottom: '1px solid #eee',
+  },
+  gameOverSection: {
+    display: 'flex',
+    justifyContent: 'center',
+    alignItems: 'center',
+    minHeight: '300px',
+  },
+  resultBox: {
+    backgroundColor: 'white',
+    padding: '40px',
+    borderRadius: '8px',
+    textAlign: 'center',
+    boxShadow: '0 4px 6px rgba(0,0,0,0.1)',
+  },
+  congrats: {
+    fontSize: '24px',
+    fontWeight: 'bold',
+    color: '#4CAF50',
+    margin: '15px 0',
+  },
+  challenge: {
+    fontSize: '18px',
+    color: '#666',
+    fontStyle: 'italic',
+    margin: '10px 0 20px 0',
+  },
+  timeDisplay: {
+    fontSize: '28px',
+    fontWeight: 'bold',
+    color: '#2196F3',
+    margin: '20px 0',
+  },
+  screenshotPrompt: {
+    backgroundColor: '#f0f8ff',
+    border: '2px solid #2196F3',
+    borderRadius: '8px',
+    padding: '20px',
+    margin: '20px 0',
+  },
+  qrCode: {
+    backgroundColor: '#ddd',
+    border: '2px dashed #666',
+    borderRadius: '8px',
+    padding: '40px 20px',
+    margin: '15px 0',
+    minHeight: '200px',
+    display: 'flex',
+    flexDirection: 'column',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  qrSubtext: {
+    fontSize: '12px',
+    color: '#666',
+    margin: '5px 0 0 0',
+  },
+  lossMessage: {
+    fontSize: '18px',
+    color: '#FF6B6B',
+    margin: '15px 0',
+  },
+  encouragement: {
+    fontSize: '16px',
+    color: '#666',
+    fontStyle: 'italic',
+    margin: '10px 0 20px 0',
+  },
+  cpuWinsHeader: {
+    fontSize: '32px',
+    color: '#FF6B6B',
+    fontWeight: 'bold',
+    textTransform: 'uppercase',
+    margin: '20px 0',
+  },
+  statsWidget: {
+    display: 'flex',
+    justifyContent: 'space-around',
+    alignItems: 'center',
+    backgroundColor: '#f0f8ff',
+    border: '2px solid #2196F3',
+    borderRadius: '10px',
+    padding: '15px',
+    marginBottom: '20px',
+    boxShadow: '0 2px 8px rgba(33, 150, 243, 0.2)',
+  },
+  statItem: {
+    textAlign: 'center',
+    flex: 1,
+  },
+  statNumber: {
+    fontSize: '28px',
+    fontWeight: 'bold',
+    color: '#2196F3',
+  },
+  statLabel: {
+    fontSize: '12px',
+    color: '#666',
+    marginTop: '5px',
+    fontWeight: 'bold',
+  },
+  statDivider: {
+    width: '2px',
+    height: '40px',
+    backgroundColor: '#2196F3',
+    margin: '0 15px',
+  },
+};
